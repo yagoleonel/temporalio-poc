@@ -1,0 +1,216 @@
+services:
+  postgresql:
+    image: postgres:${POSTGRESQL_VERSION}
+    container_name: postgresql
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    expose:
+      - ${POSTGRES_PORT}
+    volumes:
+      - temporal-db-data:/var/lib/postgresql/data
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal-history:  
+    container_name: temporal-history
+    image: temporalio/auto-setup:${TEMPORAL_VERSION}
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD}
+      - POSTGRES_SEEDS=postgresql
+      - SERVICES=history
+      - TEMPORAL_ADDRESS=temporal-frontend:7233
+      - TEMPORAL_CLI_ADDRESS=temporal-frontend:7233
+      # --- Internode TLS (server side) ---
+      # Certificate presented to other cluster services during internode communication.
+      # Also used as rootCaFiles by internode and frontend TLS clients.
+      - TEMPORAL_TLS_SERVER_CA_CERT=/etc/temporal/config/certs/ca.cert   # CA to verify internode client certificates
+      - TEMPORAL_TLS_SERVER_CERT=/etc/temporal/config/certs/cluster.pem  # Cert presented by this service to other cluster services
+      - TEMPORAL_TLS_SERVER_KEY=/etc/temporal/config/certs/cluster.key   # Private key for the internode server cert
+      - TEMPORAL_TLS_REQUIRE_CLIENT_AUTH=true                            # Require mTLS (both internode and frontend scopes)
+      # --- Internode TLS (client side) ---
+      # How this service connects to other internode services (history, matching, internal-frontend).
+      - TEMPORAL_TLS_INTERNODE_SERVER_NAME=temporal-cluster                    # Expected server name in internode certs (must match a SAN)
+      - TEMPORAL_TLS_INTERNODE_DISABLE_HOST_VERIFICATION=false           # Verify remote internode server hostname
+      # --- Frontend TLS (client side) ---
+      # How this service connects to the Frontend (e.g. namespace lookups via publicClient).
+      - TEMPORAL_TLS_FRONTEND_SERVER_NAME=temporal-cluster                     # Expected server name in the Frontend cert (must match a SAN)
+      - TEMPORAL_TLS_FRONTEND_DISABLE_HOST_VERIFICATION=false            # Verify Frontend server hostname
+      # --- Temporal CLI TLS (auto-setup only) ---
+      # Used by the Temporal CLI inside auto-setup to health-check the Frontend
+      # and register the default namespace over mTLS.
+      - TEMPORAL_TLS_CA=/etc/temporal/config/certs/ca.cert
+      - TEMPORAL_TLS_CERT=/etc/temporal/config/certs/cluster.pem
+      - TEMPORAL_TLS_KEY=/etc/temporal/config/certs/cluster.key
+      - TEMPORAL_TLS_ENABLE_HOST_VERIFICATION=true
+      - TEMPORAL_TLS_SERVER_NAME=temporal-cluster
+    ports:
+      - "7234:7234"
+      - "8000:8000"
+    volumes:
+      - ./certs:/etc/temporal/config/certs
+    networks:
+      - temporal-network
+    restart: on-failure
+
+  temporal-matching:
+    image: temporalio/server:${TEMPORAL_VERSION}
+    container_name: temporal-matching
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD}
+      - POSTGRES_SEEDS=postgresql
+      - SERVICES=matching
+      - TEMPORAL_ADDRESS=temporal-frontend:7233
+      # --- Internode TLS (server side) ---
+      # Certificate presented to other cluster services during internode communication.
+      - TEMPORAL_TLS_SERVER_CA_CERT=/etc/temporal/config/certs/ca.cert   # CA to verify internode client certificates
+      - TEMPORAL_TLS_SERVER_CERT=/etc/temporal/config/certs/cluster.pem  # Cert presented by this service to other cluster services
+      - TEMPORAL_TLS_SERVER_KEY=/etc/temporal/config/certs/cluster.key   # Private key for the internode server cert
+      - TEMPORAL_TLS_REQUIRE_CLIENT_AUTH=true                            # Require mTLS (both internode and frontend scopes)
+      # --- Internode TLS (client side) ---
+      # How this service connects to other internode services (history, matching, internal-frontend).
+      - TEMPORAL_TLS_INTERNODE_SERVER_NAME=temporal-cluster                    # Expected server name in internode certs (must match a SAN)
+      - TEMPORAL_TLS_INTERNODE_DISABLE_HOST_VERIFICATION=false           # Verify remote internode server hostname
+      # --- Frontend TLS (client side) ---
+      # How this service connects to the Frontend (e.g. namespace lookups via publicClient).
+      - TEMPORAL_TLS_FRONTEND_SERVER_NAME=temporal-cluster                     # Expected server name in the Frontend cert (must match a SAN)
+      - TEMPORAL_TLS_FRONTEND_DISABLE_HOST_VERIFICATION=false            # Verify Frontend server hostname
+    ports:
+      - "7235:7235"
+    volumes:
+      - ./certs:/etc/temporal/config/certs
+    networks:
+      - temporal-network
+    depends_on:
+      temporal-history:
+        condition: service_started
+    restart: on-failure
+
+  temporal-frontend:
+    image: temporalio/server:${TEMPORAL_VERSION}
+    container_name: temporal-frontend
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD}
+      - POSTGRES_SEEDS=postgresql
+      - SERVICES=frontend
+      - TEMPORAL_ADDRESS=temporal-frontend:7233
+      # --- Internode TLS (server side) ---
+      # Certificate presented to other cluster services during internode communication.
+      - TEMPORAL_TLS_SERVER_CA_CERT=/etc/temporal/config/certs/ca.cert   # CA to verify internode client certificates
+      - TEMPORAL_TLS_SERVER_CERT=/etc/temporal/config/certs/cluster.pem  # Cert presented by this service to other cluster services
+      - TEMPORAL_TLS_SERVER_KEY=/etc/temporal/config/certs/cluster.key   # Private key for the internode server cert
+      - TEMPORAL_TLS_REQUIRE_CLIENT_AUTH=true                            # Require mTLS (both internode and frontend scopes)
+      # --- Frontend TLS (server side) ---
+      # Certificate presented to external clients (SDKs, CLI, UI) on the gRPC endpoint.
+      # Only needed on the frontend service — it is the only service that serves external traffic.
+      - TEMPORAL_TLS_CLIENT1_CA_CERT=/etc/temporal/config/certs/ca.cert  # CA to verify external client certificates
+      - TEMPORAL_TLS_FRONTEND_CERT=/etc/temporal/config/certs/cluster.pem # Cert presented to external clients
+      - TEMPORAL_TLS_FRONTEND_KEY=/etc/temporal/config/certs/cluster.key  # Private key for the frontend server cert
+      # --- Internode TLS (client side) ---
+      # How this service connects to other internode services (history, matching, internal-frontend).
+      - TEMPORAL_TLS_INTERNODE_SERVER_NAME=temporal-cluster                    # Expected server name in internode certs (must match a SAN)
+      - TEMPORAL_TLS_INTERNODE_DISABLE_HOST_VERIFICATION=false           # Verify remote internode server hostname
+      # --- Frontend TLS (client side) ---
+      # How this service connects to the Frontend (e.g. namespace lookups via publicClient).
+      - TEMPORAL_TLS_FRONTEND_SERVER_NAME=temporal-cluster                     # Expected server name in the Frontend cert (must match a SAN)
+      - TEMPORAL_TLS_FRONTEND_DISABLE_HOST_VERIFICATION=false            # Verify Frontend server hostname
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./certs:/etc/temporal/config/certs
+    networks:
+      - temporal-network
+    depends_on:
+      temporal-matching:
+        condition: service_started
+    restart: on-failure
+
+  temporal-worker:
+    image: temporalio/server:${TEMPORAL_VERSION}
+    container_name: temporal-worker
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD}
+      - POSTGRES_SEEDS=postgresql
+      - SERVICES=worker
+      - PUBLIC_FRONTEND_ADDRESS=temporal-frontend:7233
+      - TEMPORAL_ADDRESS=temporal-frontend:7233
+      # --- Internode TLS (server side) ---
+      # Certificate presented to other cluster services during internode communication.
+      - TEMPORAL_TLS_SERVER_CA_CERT=/etc/temporal/config/certs/ca.cert   # CA to verify internode client certificates
+      - TEMPORAL_TLS_SERVER_CERT=/etc/temporal/config/certs/cluster.pem  # Cert presented by this service to other cluster services
+      - TEMPORAL_TLS_SERVER_KEY=/etc/temporal/config/certs/cluster.key   # Private key for the internode server cert
+      - TEMPORAL_TLS_REQUIRE_CLIENT_AUTH=true                            # Require mTLS (both internode and frontend scopes)
+      # --- Internode TLS (client side) ---
+      # How this service connects to other internode services (history, matching, internal-frontend).
+      - TEMPORAL_TLS_INTERNODE_SERVER_NAME=temporal-cluster                    # Expected server name in internode certs (must match a SAN)
+      - TEMPORAL_TLS_INTERNODE_DISABLE_HOST_VERIFICATION=false           # Verify remote internode server hostname
+      # --- Frontend TLS (client side) ---
+      # How the worker connects to the Frontend service over TLS.
+      - TEMPORAL_TLS_FRONTEND_SERVER_NAME=temporal-cluster                     # Expected server name in the Frontend cert (must match a SAN)
+      - TEMPORAL_TLS_FRONTEND_DISABLE_HOST_VERIFICATION=false            # Verify Frontend server hostname
+    volumes:
+      - ./certs:/etc/temporal/config/certs
+    networks:
+      - temporal-network
+    depends_on:
+      temporal-frontend:
+        condition: service_started
+    restart: on-failure
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: temporal-ui
+    environment:
+      - TEMPORAL_ADDRESS=temporal-frontend:7233
+      # --- Frontend TLS (client side) ---
+      # The UI connects to the Frontend as an external client using the client certificate.
+      - TEMPORAL_TLS_CA=/etc/temporal/config/certs/ca.cert               # CA to verify the Frontend server cert
+      - TEMPORAL_TLS_CERT=/etc/temporal/config/certs/client.pem          # Client cert presented to the Frontend
+      - TEMPORAL_TLS_KEY=/etc/temporal/config/certs/client.key           # Private key for the client cert
+      - TEMPORAL_TLS_ENABLE_HOST_VERIFICATION=true                       # Verify the Frontend server hostname
+      - TEMPORAL_TLS_SERVER_NAME=temporal-cluster                              # Expected server name in the Frontend cert (must match a SAN)
+      # --- OIDC Authentication ---
+      - TEMPORAL_AUTH_ENABLED=${TEMPORAL_AUTH_ENABLED}
+      - TEMPORAL_AUTH_PROVIDER_URL=${TEMPORAL_AUTH_PROVIDER_URL}
+      - TEMPORAL_AUTH_CLIENT_ID=${TEMPORAL_AUTH_CLIENT_ID}
+      - TEMPORAL_AUTH_CLIENT_SECRET=${TEMPORAL_AUTH_CLIENT_SECRET}
+      - TEMPORAL_AUTH_CALLBACK_URL=${TEMPORAL_AUTH_CALLBACK_URL}
+      - TEMPORAL_AUTH_SCOPES=${TEMPORAL_AUTH_SCOPES}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./certs:/etc/temporal/config/certs
+    networks:
+      - temporal-network
+    depends_on:
+      temporal-frontend:
+        condition: service_started
+
+networks:
+  temporal-network:
+    driver: bridge
+    name: temporal-network
+
+volumes:
+  temporal-db-data:
